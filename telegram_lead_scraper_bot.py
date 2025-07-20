@@ -330,11 +330,12 @@ async def main_loop():
             error_logger.error(f"Main loop error: {e}")
         await asyncio.sleep(3600 * 6)  # run every 6 hours
 
-async def main():
+if __name__ == '__main__':
     try:
-        await main_loop()
-    except KeyboardInterrupt:
-        logging.info("Bot stopped by user.")
+        bot_app.run_polling(stop_signals=None)
+    except Exception as e:
+        logger.exception(f"Fatal error in bot loop: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     asyncio.run(main())
