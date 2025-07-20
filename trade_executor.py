@@ -181,12 +181,10 @@ class TradeExecutor:
         return trade_id
 
     def _parse_open_time(self, tstr):
-        # OANDA timestamps may include nanoseconds (e.g. 2025-07-16T18:41:54.938607003Z)
-        # Python's fromisoformat supports microseconds max (6 digits).
         if '.' in tstr:
             base, frac = tstr.split('.')
             frac = frac.rstrip('Z')
-            frac = frac[:6].ljust(6, '0')  # truncate or pad to 6 digits for microseconds
+            frac = frac[:6].ljust(6, '0')
             tstr = f"{base}.{frac}+00:00"
         else:
             tstr = tstr.rstrip('Z') + "+00:00"
