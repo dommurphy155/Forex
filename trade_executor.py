@@ -173,7 +173,7 @@ class TradeExecutor:
             return None
         balance = self.balance()
         risk = balance * RP
-        units = int((risk * 33) / signal['price'])
+        units = max(1, int((risk * 33) / signal['price']))
         order_response = self.place(signal['pair'], units, signal['stop_loss'], signal['take_profit'])
         trade_id = order_response['orderFillTransaction']['tradeOpened']['tradeID']
         self.save_open(trade_id, signal['pair'], units, signal['price'], signal['confidence'], signal['expected_roi'], signal['stop_loss'], signal['take_profit'])
