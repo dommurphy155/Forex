@@ -6,11 +6,40 @@ import sqlite3
 import logging
 import datetime
 import math
+import json
 import numpy as np
 import xgboost as xgb
 from typing import List, Dict, Any, Optional, Tuple
+from filelock import FileLock
+from logging.handlers import RotatingFileHandler
+from aiohttp.client_exceptions import ClientError
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 # --- CONFIGURATION ---
+CONFIG_FILE = os.getenv("FOREX_CONFIG", "config.json")
+DEFAULT_CONFIG = {
+    "PAIRS": ["EUR_USD", "GBP_USD", "USD_JPY", "USD_CAD", "AUD_USD", "NZD_USD", "USD_CHF"],
+    "RISK_PCT": 0.02,
+    "LEVERAGE": 33,
+    "MAX_TRADES_DAY": 20,
+    "MIN_TRADES_DAY": 5,
+    "MAX_CONCURRENT": 1,
+    "TRADE_LIMIT_SEC": 2 * 60 * 60,  # 2 hours
+    "TRADE_CHECK_INTERVAL": 15,
+    "DB_FILE": "forex_bot_state.sqlite",
+    "PEAK_HOURS_UTC": [(12, 16)],  # London/New York overlap
+    "LOG_MAX_BYTES": 10 * 1024 * 1024,  # 10MB
+    "LOG_BACKUP_COUNT": 5
+}
+
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'r') as f:
+            return {**DEFAULT_CONFIG, **json.load(f)}
+    return DEFAULT_CONFIG
+
+CONFIG = load_config()
+
 OANDA_API_KEY = os.getenv("OANDA_API_KEY")
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -20,33 +49,26 @@ if not all([OANDA_API_KEY, OANDA_ACCOUNT_ID, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_I
     print("ERROR: Missing environment variables. Please export OANDA_API_KEY, OANDA_ACCOUNT_ID, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID")
     sys.exit(1)
 
-TELEGRAM_CHAT_ID = str(TELEGRAM_CHAT_ID)  # Ensure string for comparison
+TELEGRAM_CHAT_ID = str(TELEGRAM_CHAT_ID)
 
-PAIRS = ['EUR_USD', 'GBP_USD', 'USD_JPY', 'USD_CAD', 'AUD_USD', 'NZD_USD', 'USD_CHF']
-RISK_PCT = 0.02
-LEVERAGE = 33
-MAX_TRADES_DAY = 20
-MIN_TRADES_DAY = 5
-MAX_CONCURRENT = 1
-TRADE_LIMIT_SEC = 2 * 60 * 60  # 2 hours
-TRADE_CHECK_INTERVAL = 15
-DB_FILE = "forex_bot_state.sqlite"
-PEAK_HOURS_UTC = [(12, 16)]  # 12:00-16:00 UTC London/New York overlap approx
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[
-        logging.FileHandler("forex_bot.log"),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+# Logging setup with rotation
 logger = logging.getLogger("forex_bot")
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+file_handler = RotatingFileHandler(
+    "forex_bot.log", maxBytes=CONFIG["LOG_MAX_BYTES"], backupCount=CONFIG["LOG_BACKUP_COUNT"]
+)
+file_handler.setFormatter(formatter)
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+logger.addHandler(stream_handler)
 
 # --- DATABASE ---
 class DB:
     def __init__(self):
-        self.conn = sqlite3.connect(DB_FILE, detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
+        os.makedirs(os.path.dirname(CONFIG["DB_FILE"]), exist_ok=True)
+        self.conn = sqlite3.connect(CONFIG["DB_FILE"], detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
         self._init_schema()
 
     def _init_schema(self):
@@ -70,6 +92,7 @@ class DB:
                 status TEXT NOT NULL CHECK(status IN ('OPEN','CLOSED'))
             )
             """)
+
     def insert_trade(self, trade: Dict[str, Any]):
         with self.conn:
             self.conn.execute("""
@@ -88,7 +111,7 @@ class DB:
                 trade["expected_roi"]
             ))
 
-    def update_trade_close(self, trade_id: str, close_price: float, close_time: str, pl: float, duration_sec: int, status: str):
+    def update_trade_close(self, trade_id: str, close_price: float, close_time: datetime.datetime, pl: float, duration_sec: int, status: str):
         with self.conn:
             self.conn.execute("""
             UPDATE trades SET close_price=?, close_time=?, pl=?, duration_sec=?, status=?
@@ -119,41 +142,54 @@ class OandaClient:
     def __init__(self, api_key: str, account_id: str):
         self.api_key = api_key
         self.account_id = account_id
-        self.session = aiohttp.ClientSession(
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
-        )
+        self.session = None
+
+    async def initialize_session(self):
+        if self.session is None:
+            self.session = aiohttp.ClientSession(
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json"
+                }
+            )
 
     async def close(self):
-        await self.session.close()
+        if self.session:
+            await self.session.close()
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     async def get_account_summary(self) -> Dict[str, Any]:
+        if not self.session:
+            await self.initialize_session()
         url = f"{self.BASE_URL}/accounts/{self.account_id}/summary"
         async with self.session.get(url) as resp:
             resp.raise_for_status()
             return await resp.json()
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     async def get_open_positions(self) -> List[Dict[str, Any]]:
+        if not self.session:
+            await self.initialize_session()
         url = f"{self.BASE_URL}/accounts/{self.account_id}/openPositions"
         async with self.session.get(url) as resp:
             resp.raise_for_status()
             data = await resp.json()
             return data.get("positions", [])
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     async def get_instruments_candles(self, instrument: str, count: int = 50, granularity: str = "M5") -> Dict[str, Any]:
+        if not self.session:
+            await self.initialize_session()
         url = f"{self.BASE_URL}/instruments/{instrument}/candles"
-        params = {
-            "count": count,
-            "granularity": granularity,
-            "price": "M"
-        }
+        params = {"count": count, "granularity": granularity, "price": "M"}
         async with self.session.get(url, params=params) as resp:
             resp.raise_for_status()
             return await resp.json()
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     async def create_order(self, instrument: str, units: int, stop_loss: float, take_profit: float) -> Dict[str, Any]:
+        if not self.session:
+            await self.initialize_session()
         url = f"{self.BASE_URL}/accounts/{self.account_id}/orders"
         direction = "BUY" if units > 0 else "SELL"
         data = {
@@ -170,21 +206,31 @@ class OandaClient:
             resp.raise_for_status()
             return await resp.json()
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     async def close_trade(self, trade_id: str) -> Dict[str, Any]:
+        if not self.session:
+            await self.initialize_session()
         url = f"{self.BASE_URL}/accounts/{self.account_id}/trades/{trade_id}/close"
         async with self.session.put(url) as resp:
             resp.raise_for_status()
             return await resp.json()
 
-# --- TRADE LOGIC (XGBoost MODEL BUILT-IN) ---
+# --- TRADE LOGIC ---
 class TradeLogic:
+    PIP_VALUES = {
+        "USD_JPY": 0.01,
+        "EUR_USD": 0.0001,
+        "GBP_USD": 0.0001,
+        "USD_CAD": 0.0001,
+        "AUD_USD": 0.0001,
+        "NZD_USD": 0.0001,
+        "USD_CHF": 0.0001
+    }
+
     def __init__(self):
-        # dummy fixed model trained on dummy data for demonstration; replace with real backtested model later
-        # This model outputs a float between 0 and 1 representing confidence score.
         self.model = self._train_dummy_model()
 
     def _train_dummy_model(self):
-        # Dummy training data: features = [ATR, price change %, volatility], label = expected ROI (scaled)
         X = np.array([
             [0.0010, 0.0005, 0.0008],
             [0.0020, -0.0003, 0.0012],
@@ -208,26 +254,23 @@ class TradeLogic:
         price_change_pct = (closes[-1] - closes[-2]) / closes[-2] if len(closes) > 1 else 0
         volatility = np.std(closes[-10:]) if len(closes) >= 10 else np.std(closes)
 
-        features = np.array([atr, price_change_pct, volatility]).reshape(1, -1)
-        return features
+        return np.array([atr, price_change_pct, volatility]).reshape(1, -1)
 
     def _calc_atr(self, highs: np.ndarray, lows: np.ndarray, closes: np.ndarray) -> float:
         trs = []
         for i in range(1, len(closes)):
             tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
             trs.append(tr)
-        atr = np.mean(trs) if trs else 0.0
-        return atr
+        return np.mean(trs) if trs else 0.0
 
     def score_trade(self, features: np.ndarray) -> float:
         dtest = xgb.DMatrix(features)
         pred = self.model.predict(dtest)
-        return float(pred[0])  # scalar confidence
+        return float(pred[0])
 
     def decide_direction(self, confidence: float) -> Optional[str]:
         if confidence < 0.5:
             return None
-        # Simple dummy logic: buy if positive expected ROI > 0.02 else sell; just demonstration
         return "BUY" if confidence > 0.02 else "SELL"
 
     def calculate_sl_tp(self, candles: List[Dict[str, Any]], entry_price: float, direction: str) -> Tuple[float, float]:
@@ -245,6 +288,11 @@ class TradeLogic:
             tp = max(entry_price - atr * 3.0, 0.00001)
         return sl, tp
 
+    def calculate_pl(self, pair: str, open_price: float, close_price: float, units: int, direction: str) -> float:
+        pip_value = self.PIP_VALUES.get(pair, 0.0001)
+        pips = (close_price - open_price) / pip_value if direction == "BUY" else (open_price - close_price) / pip_value
+        return pips * abs(units) * pip_value
+
 # --- TELEGRAM INTERFACE ---
 class TelegramBot:
     BASE_URL = "https://api.telegram.org/bot"
@@ -253,14 +301,30 @@ class TelegramBot:
         self.token = token
         self.chat_id = chat_id
         self.bot_logic = bot_logic
-        self.session = aiohttp.ClientSession()
+        self.session = None
+        self.offset = None
 
-        self.offset = None  # Telegram update offset to avoid repeats
+    async def initialize_session(self):
+        if self.session is None:
+            self.session = aiohttp.ClientSession()
+
+    async def clear_updates(self):
+        try:
+            await self.initialize_session()
+            url = f"{self.BASE_URL}{self.token}/getUpdates"
+            async with self.session.get(url, params={"offset": -1}) as resp:
+                resp.raise_for_status()
+                logger.info("Cleared Telegram updates")
+        except Exception as e:
+            logger.error(f"Failed to clear Telegram updates: {e}")
 
     async def close(self):
-        await self.session.close()
+        if self.session:
+            await self.session.close()
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     async def get_updates(self) -> List[Dict[str, Any]]:
+        await self.initialize_session()
         url = f"{self.BASE_URL}{self.token}/getUpdates"
         params = {"timeout": 20}
         if self.offset is not None:
@@ -272,37 +336,42 @@ class TelegramBot:
                 return []
             return data.get("result", [])
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     async def send_message(self, text: str):
+        await self.initialize_session()
         url = f"{self.BASE_URL}{self.token}/sendMessage"
         payload = {"chat_id": self.chat_id, "text": text}
         async with self.session.post(url, json=payload) as resp:
             resp.raise_for_status()
 
     async def handle_commands(self):
-        updates = await self.get_updates()
-        for update in updates:
-            self.offset = update["update_id"] + 1
-            message = update.get("message")
-            if not message:
-                continue
-            from_id = str(message.get("from", {}).get("id", ""))
-            if from_id != self.chat_id:
-                await self.send_message("Unauthorized user. Access denied.")
-                continue
-            text = message.get("text", "").strip()
-            if text.startswith("/"):
-                cmd = text.split()[0].lower()
-                handler = getattr(self, f"cmd_{cmd[1:]}", None)
-                if handler:
-                    await handler()
-                else:
-                    await self.send_message(f"Unknown command: {cmd}")
+        try:
+            updates = await self.get_updates()
+            for update in updates:
+                self.offset = update["update_id"] + 1
+                message = update.get("message")
+                if not message:
+                    continue
+                from_id = str(message.get("from", {}).get("id", ""))
+                if from_id != self.chat_id:
+                    await self.send_message("Unauthorized user. Access denied.")
+                    continue
+                text = message.get("text", "").strip()
+                if text.startswith("/"):
+                    cmd = text.split()[0].lower()
+                    handler = getattr(self, f"cmd_{cmd[1:]}", None)
+                    if handler:
+                        await handler()
+                    else:
+                        await self.send_message(f"Unknown command: {cmd}")
+        except Exception as e:
+            logger.error(f"Error handling Telegram commands: {e}")
 
     async def cmd_daily(self):
         trades_today = self.bot_logic.db.count_trades_today()
         closed = self.bot_logic.db.get_closed_trades(limit=1000)
-        pl_total = sum(t.get("pl") or 0 for t in closed if t.get("close_time", "").date() == datetime.datetime.utcnow().date())
-        roi_pct = (pl_total / 91626.31) * 100 if 91626.31 else 0
+        pl_total = sum(t.get("pl") or 0 for t in closed if t.get("close_time") and t.get("close_time").date() == datetime.datetime.utcnow().date())
+        roi_pct = (pl_total / self.bot_logic.balance) * 100 if self.bot_logic.balance else 0
         await self.send_message(f"Today's summary:\nTrades: {trades_today}\nP/L: £{pl_total:.2f}\nROI: {roi_pct:.2f}%")
 
     async def cmd_weekly(self):
@@ -315,8 +384,7 @@ class TelegramBot:
         await self.send_message(f"Weekly ROI: £{pl_total:.2f}\nBest trade: {best_info}")
 
     async def cmd_status(self):
-        # Basic health check
-        await self.send_message("Bot is running normally.")
+        await self.send_message(f"Bot is running. Balance: £{self.bot_logic.balance:.2f}, Open trades: {len(self.bot_logic.open_trades)}")
 
     async def cmd_maketrade(self):
         trade = await self.bot_logic.auto_place_trade()
@@ -363,68 +431,80 @@ class ForexBot:
         self.balance = 0.0
         self.open_trades = []
         self.trade_count_today = 0
+        self.lock_file = "/tmp/forex_bot.lock"
+
+    async def initialize(self):
+        await self.oanda.initialize_session()
+        await self.telegram.initialize_session()
+        await self.telegram.clear_updates()
 
     async def update_account_balance(self):
-        data = await self.oanda.get_account_summary()
-        self.balance = float(data["account"]["balance"])
-        logger.info(f"Account balance updated: £{self.balance:.2f}")
+        try:
+            data = await self.oanda.get_account_summary()
+            self.balance = float(data["account"]["balance"])
+            logger.info(f"Account balance updated: £{self.balance:.2f}")
+        except ClientError as e:
+            logger.error(f"Failed to update account balance: {e}")
 
     async def refresh_open_trades(self):
-        positions = await self.oanda.get_open_positions()
-        self.open_trades = []
-        for pos in positions:
-            if pos["instrument"] in PAIRS:
-                trade = {
-                    "trade_id": pos["tradeIDs"][0] if pos.get("tradeIDs") else None,
-                    "pair": pos["instrument"],
-                    "units": int(pos["long"]["units"]) if int(pos["long"]["units"]) != 0 else -int(pos["short"]["units"]),
-                    "open_price": float(pos["averagePrice"]),
-                    "direction": "BUY" if int(pos["long"]["units"]) > 0 else "SELL",
-                    "open_time": datetime.datetime.utcnow()
-                }
-                self.open_trades.append(trade)
-        logger.info(f"Open trades refreshed: {len(self.open_trades)}")
+        try:
+            positions = await self.oanda.get_open_positions()
+            self.open_trades = []
+            for pos in positions:
+                if pos["instrument"] in CONFIG["PAIRS"]:
+                    trade = {
+                        "trade_id": pos["tradeIDs"][0] if pos.get("tradeIDs") else None,
+                        "pair": pos["instrument"],
+                        "units": int(pos["long"]["units"]) if int(pos["long"]["units"]) != 0 else -int(pos["short"]["units"]),
+                        "open_price": float(pos["averagePrice"]),
+                        "direction": "BUY" if int(pos["long"]["units"]) > 0 else "SELL",
+                        "open_time": datetime.datetime.utcnow()
+                    }
+                    self.open_trades.append(trade)
+            logger.info(f"Open trades refreshed: {len(self.open_trades)}")
+        except ClientError as e:
+            logger.error(f"Failed to refresh open trades: {e}")
 
     async def auto_place_trade(self) -> Optional[Dict[str, Any]]:
-        if len(self.open_trades) >= MAX_CONCURRENT:
+        if len(self.open_trades) >= CONFIG["MAX_CONCURRENT"]:
             logger.info("Max concurrent trades reached.")
             return None
 
         trades_today = self.db.count_trades_today()
-        if trades_today >= MAX_TRADES_DAY:
+        if trades_today >= CONFIG["MAX_TRADES_DAY"]:
             logger.info("Max trades for today reached.")
             return None
 
-        # Find best trade candidate
         best_candidate = None
         best_score = 0.0
         best_data = None
 
-        for pair in PAIRS:
-            candles = await self.oanda.get_instruments_candles(pair, count=50)
-            if "candles" not in candles:
-                continue
-            features = self.trade_logic.prepare_features(candles["candles"])
-            confidence = self.trade_logic.score_trade(features)
+        for pair in CONFIG["PAIRS"]:
+            try:
+                candles = await self.oanda.get_instruments_candles(pair, count=50)
+                if "candles" not in candles:
+                    continue
+                features = self.trade_logic.prepare_features(candles["candles"])
+                confidence = self.trade_logic.score_trade(features)
 
-            if confidence < 0.5:
-                continue
-            expected_roi = confidence  # Simplified mapping
+                if confidence < 0.5:
+                    continue
+                expected_roi = confidence
 
-            if expected_roi < 0.01:  # Ignore below 1% ROI
-                continue
+                if expected_roi < 0.01:
+                    continue
 
-            # Peak hours check
-            now_utc = datetime.datetime.utcnow().hour
-            in_peak = any(start <= now_utc < end for start, end in PEAK_HOURS_UTC)
+                now_utc = datetime.datetime.utcnow().hour
+                in_peak = any(start <= now_utc < end for start, end in CONFIG["PEAK_HOURS_UTC"])
+                if not in_peak and not (confidence == 1.0 and expected_roi >= 0.10):
+                    continue
 
-            if not in_peak and not (confidence == 1.0 and expected_roi >= 0.10):
-                continue
-
-            if confidence > best_score:
-                best_score = confidence
-                best_candidate = pair
-                best_data = (candles["candles"], confidence, expected_roi)
+                if confidence > best_score:
+                    best_score = confidence
+                    best_candidate = pair
+                    best_data = (candles["candles"], confidence, expected_roi)
+            except ClientError as e:
+                logger.error(f"Failed to process pair {pair}: {e}")
 
         if not best_candidate:
             return None
@@ -435,25 +515,23 @@ class ForexBot:
         if direction is None:
             return None
 
-        # Calculate position size based on risk
         atr = self.trade_logic._calc_atr(
             np.array([float(c["mid"]["h"]) for c in candles]),
             np.array([float(c["mid"]["l"]) for c in candles]),
             np.array([float(c["mid"]["c"]) for c in candles])
         )
-        risk_amount = self.balance * RISK_PCT
-        pip_value = 0.0001  # Approx for major pairs (simplify)
-        units = int((risk_amount / (atr / pip_value)) * LEVERAGE)
+        risk_amount = self.balance * CONFIG["RISK_PCT"]
+        pip_value = self.trade_logic.PIP_VALUES.get(best_candidate, 0.0001)
+        units = int((risk_amount / (atr / pip_value)) * CONFIG["LEVERAGE"])
         if direction == "SELL":
             units = -units
 
         stop_loss, take_profit = self.trade_logic.calculate_sl_tp(candles, entry_price, direction)
 
-        # Place order via OANDA
         try:
             order_resp = await self.oanda.create_order(best_candidate, units, stop_loss, take_profit)
             order_id = order_resp["orderFillTransaction"]["id"]
-        except Exception as e:
+        except ClientError as e:
             logger.error(f"Failed to place order: {e}")
             return None
 
@@ -480,34 +558,32 @@ class ForexBot:
         for t in open_trades:
             open_time = t["open_time"]
             duration = (datetime.datetime.utcnow() - open_time).total_seconds()
-            if duration < TRADE_LIMIT_SEC:
-                continue
-
-            # Get current price for pair
-            candles = await self.oanda.get_instruments_candles(t["pair"], count=1)
-            if "candles" not in candles or not candles["candles"]:
-                continue
-            current_price = float(candles["candles"][-1]["mid"]["c"])
-
-            pl = (current_price - t["open_price"]) * t["units"]  # Simplified P/L calc
-            if t["direction"] == "SELL":
-                pl = (t["open_price"] - current_price) * abs(t["units"])
-
-            if pl <= 0:
+            if duration < CONFIG["TRADE_LIMIT_SEC"]:
                 continue
 
             try:
+                candles = await self.oanda.get_instruments_candles(t["pair"], count=1)
+                if "candles" not in candles or not candles["candles"]:
+                    continue
+                current_price = float(candles["candles"][-1]["mid"]["c"])
+
+                pl = self.trade_logic.calculate_pl(t["pair"], t["open_price"], current_price, t["units"], t["direction"])
+
+                if pl <= 0:
+                    continue
+
                 await self.oanda.close_trade(t["trade_id"])
                 close_time = datetime.datetime.utcnow()
                 duration_sec = int((close_time - open_time).total_seconds())
                 self.db.update_trade_close(t["trade_id"], current_price, close_time, pl, duration_sec, "CLOSED")
                 logger.info(f"Closed trade {t['trade_id']} profitably after {duration_sec}s with P/L: £{pl:.2f}")
                 self.open_trades = [ot for ot in self.open_trades if ot["trade_id"] != t["trade_id"]]
-            except Exception as e:
+            except ClientError as e:
                 logger.error(f"Failed to close trade {t['trade_id']}: {e}")
 
     async def run(self):
         logger.info("ForexBot started")
+        await self.initialize()
         try:
             while True:
                 try:
@@ -517,12 +593,20 @@ class ForexBot:
                     await self.telegram.handle_commands()
                 except Exception as e:
                     logger.error(f"Unhandled exception in main loop: {e}")
-                await asyncio.sleep(TRADE_CHECK_INTERVAL)
+                await asyncio.sleep(CONFIG["TRADE_CHECK_INTERVAL"])
         finally:
             await self.oanda.close()
             await self.telegram.close()
 
-
 if __name__ == "__main__":
-    bot = ForexBot()
-    asyncio.run(bot.run())
+    lock = FileLock("/tmp/forex_bot.lock", timeout=1)
+    try:
+        with lock:
+            bot = ForexBot()
+            asyncio.run(bot.run())
+    except FileLock.Timeout:
+        logger.error("Another instance of the bot is running. Exiting.")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        sys.exit(1)
