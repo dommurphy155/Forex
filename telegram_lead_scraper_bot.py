@@ -312,7 +312,7 @@ async def main_loop():
     bot_app.add_handler(CommandHandler("startjob", startjob))
     bot_app.add_handler(CommandHandler("stats", stats))
     bot_app.add_handler(CommandHandler("export", export))
-    await bot_app.start()
+    await bot_app.run_polling()
     await bot_app.updater.start_polling()
 
     client = TelegramClient(SESSION_NAME, api_id=123456, api_hash="abcdef1234567890abcdef1234567890") # dummy placeholders, but we will run in bot-only mode
