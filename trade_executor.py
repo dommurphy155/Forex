@@ -180,10 +180,26 @@ class TradeExecutor:
         logging.info(f"Placed trade {trade_id} for {signal['pair']}")
         return trade_id
 
+    def _parse_open_time(self, tstr):
+        # OANDA timestamps may include nanoseconds (e.g. 2025-07-16T18:41:54.938607003Z)
+        # Python's fromisoformat supports microseconds max (6 digits).
+        if '.' in tstr:
+            base, frac = tstr.split('.')
+            frac = frac.rstrip('Z')
+            frac = frac[:6].ljust(6, '0')  # truncate or pad to 6 digits for microseconds
+            tstr = f"{base}.{frac}+00:00"
+        else:
+            tstr = tstr.rstrip('Z') + "+00:00"
+        return datetime.fromisoformat(tstr)
+
     def check_close(self):
         for trade in self.open_trades():
             trade_id = trade['id']
-            open_time = datetime.fromisoformat(trade['openTime'].replace('Z', '+00:00'))
+            try:
+                open_time = self._parse_open_time(trade['openTime'])
+            except Exception as e:
+                logging.error(f"Failed to parse openTime '{trade['openTime']}' for trade {trade_id}: {e}")
+                continue
             elapsed_sec = (datetime.utcnow().replace(tzinfo=timezone.utc) - open_time).total_seconds()
             unrealized_pl = float(trade.get('unrealizedPL', 0))
             current_price = float(trade.get('price', 0))
@@ -191,7 +207,7 @@ class TradeExecutor:
                 self.close(trade_id)
                 self.update_close(trade_id, current_price, unrealized_pl)
                 self.daily_ok(unrealized_pl)
-                logging.info(f"Auto-closed trade {trade_id} after {elapsed_sec} seconds with profit {unrealized_pl}")
+                logging.info(f"Auto-closed trade {trade_id} after {elapsed_sec:.0f}s with profit {unrealized_pl}")
 
     def status(self):
         c = self.conn.cursor()
