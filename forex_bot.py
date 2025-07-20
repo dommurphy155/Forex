@@ -14,6 +14,7 @@ from filelock import FileLock
 from logging.handlers import RotatingFileHandler
 from aiohttp.client_exceptions import ClientError
 from tenacity import retry, stop_after_attempt, wait_exponential
+import traceback
 
 # --- CONFIGURATION ---
 CONFIG_FILE = os.getenv("FOREX_CONFIG", "config.json")
@@ -303,6 +304,7 @@ class TelegramBot:
         self.bot_logic = bot_logic
         self.session = None
         self.offset = None
+        self.last_error = None
 
     async def initialize_session(self):
         if self.session is None:
@@ -365,7 +367,8 @@ class TelegramBot:
                     else:
                         await self.send_message(f"Unknown command: {cmd}")
         except Exception as e:
-            logger.error(f"Error handling Telegram commands: {e}")
+            self.last_error = traceback.format_exc()
+            logger.error(f"Error handling Telegram commands: {e}\n{self.last_error}")
 
     async def cmd_daily(self):
         trades_today = self.bot_logic.db.count_trades_today()
@@ -421,6 +424,12 @@ class TelegramBot:
             msg += (f"{t['pair']} {t['direction']} P/L: £{pl:.2f} Duration: {duration//60}m\n")
         await self.send_message(msg)
 
+    async def cmd_debug(self):
+        if self.last_error:
+            await self.send_message(f"Last error:\n{self.last_error[:1000]}")
+        else:
+            await self.send_message("No recent errors recorded.")
+
 # --- MAIN BOT LOGIC ---
 class ForexBot:
     def __init__(self):
@@ -451,19 +460,31 @@ class ForexBot:
             positions = await self.oanda.get_open_positions()
             self.open_trades = []
             for pos in positions:
-                if pos["instrument"] in CONFIG["PAIRS"]:
-                    trade = {
-                        "trade_id": pos["tradeIDs"][0] if pos.get("tradeIDs") else None,
-                        "pair": pos["instrument"],
-                        "units": int(pos["long"]["units"]) if int(pos["long"]["units"]) != 0 else -int(pos["short"]["units"]),
-                        "open_price": float(pos["averagePrice"]),
-                        "direction": "BUY" if int(pos["long"]["units"]) > 0 else "SELL",
-                        "open_time": datetime.datetime.utcnow()
-                    }
-                    self.open_trades.append(trade)
+                if pos["instrument"] not in CONFIG["PAIRS"]:
+                    continue
+                long_units = int(pos.get("long", {}).get("units", 0))
+                short_units = int(pos.get("short", {}).get("units", 0))
+                if long_units == 0 and short_units == 0:
+                    logger.debug(f"Skipping position for {pos['instrument']}: no units")
+                    continue
+                units = long_units if long_units != 0 else -short_units
+                direction = "BUY" if long_units != 0 else "SELL"
+                average_price = pos.get("long", {}).get("averagePrice") or pos.get("short", {}).get("averagePrice")
+                if not average_price:
+                    logger.error(f"No averagePrice for {pos['instrument']}: {pos}")
+                    continue
+                trade = {
+                    "trade_id": pos.get("tradeIDs", [None])[0],
+                    "pair": pos["instrument"],
+                    "units": units,
+                    "open_price": float(average_price),
+                    "direction": direction,
+                    "open_time": datetime.datetime.utcnow()
+                }
+                self.open_trades.append(trade)
             logger.info(f"Open trades refreshed: {len(self.open_trades)}")
         except ClientError as e:
-            logger.error(f"Failed to refresh open trades: {e}")
+            logger.error(f"Failed to refresh open trades: {e}\n{traceback.format_exc()}")
 
     async def auto_place_trade(self) -> Optional[Dict[str, Any]]:
         if len(self.open_trades) >= CONFIG["MAX_CONCURRENT"]:
@@ -483,6 +504,7 @@ class ForexBot:
             try:
                 candles = await self.oanda.get_instruments_candles(pair, count=50)
                 if "candles" not in candles:
+                    logger.warning(f"No candles for {pair}")
                     continue
                 features = self.trade_logic.prepare_features(candles["candles"])
                 confidence = self.trade_logic.score_trade(features)
@@ -564,6 +586,7 @@ class ForexBot:
             try:
                 candles = await self.oanda.get_instruments_candles(t["pair"], count=1)
                 if "candles" not in candles or not candles["candles"]:
+                    logger.warning(f"No candles for {t['pair']} when closing trade")
                     continue
                 current_price = float(candles["candles"][-1]["mid"]["c"])
 
@@ -592,7 +615,8 @@ class ForexBot:
                     await self.close_profitable_trades()
                     await self.telegram.handle_commands()
                 except Exception as e:
-                    logger.error(f"Unhandled exception in main loop: {e}")
+                    self.telegram.last_error = traceback.format_exc()
+                    logger.error(f"Unhandled exception in main loop: {e}\n{self.telegram.last_error}")
                 await asyncio.sleep(CONFIG["TRADE_CHECK_INTERVAL"])
         finally:
             await self.oanda.close()
@@ -608,5 +632,5 @@ if __name__ == "__main__":
         logger.error("Another instance of the bot is running. Exiting.")
         sys.exit(1)
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
+        logger.error(f"Fatal error: {e}\n{traceback.format_exc()}")
         sys.exit(1)
