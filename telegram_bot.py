@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-import os
-import sys
-import subprocess
-import logging
-import asyncio
-from datetime import datetime
-
+import os, sys, asyncio, subprocess, logging
 from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
@@ -14,23 +8,38 @@ AUTHORIZED_CHAT_ID = int(os.getenv("TELEGRAM_CHAT_ID"))
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(message)s')
 
-bot = Bot(token=TELEGRAM_TOKEN)
-
 async def unauthorized_response(update: Update):
-    await update.message.reply_text("Unauthorized access. This bot only accepts commands from authorized users.")
+    await update.message.reply_text("Unauthorized access.")
 
 def check_auth(update: Update):
     return update.effective_chat.id == AUTHORIZED_CHAT_ID
 
-async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cmd = update.message.text.strip()
     if not check_auth(update):
         return await unauthorized_response(update)
-    proc = await asyncio.create_subprocess_exec(sys.executable, "trade_executor.py", "status", stdout=asyncio.subprocess.PIPE)
-    out, _ = await proc.communicate()
-    await update.message.reply_text(out.decode().strip())
+    if cmd == "/daily":
+        p = await asyncio.create_subprocess_exec(sys.executable, "trade_executor.py", "status", stdout=asyncio.subprocess.PIPE)
+        out,_ = await p.communicate(); await update.message.reply_text(out.decode())
+    elif cmd == "/open":
+        p = await asyncio.create_subprocess_exec(sys.executable, "trade_executor.py", "open", stdout=asyncio.subprocess.PIPE)
+        out,_ = await p.communicate(); await update.message.reply_text(out.decode())
+    elif cmd == "/closed":
+        p = await asyncio.create_subprocess_exec(sys.executable, "trade_executor.py", "closed", stdout=asyncio.subprocess.PIPE)
+        out,_ = await p.communicate(); await update.message.reply_text(out.decode())
+    elif cmd == "/status":
+        p = await asyncio.create_subprocess_exec(sys.executable, "trade_executor.py", "status", stdout=asyncio.subprocess.PIPE)
+        out,_ = await p.communicate(); await update.message.reply_text(out.decode())
+    elif cmd == "/maketrade":
+        p = await asyncio.create_subprocess_exec(sys.executable, "trade_executor.py", stdout=asyncio.subprocess.PIPE)
+        out,_ = await p.communicate(); await update.message.reply_text(out.decode())
+    else:
+        await update.message.reply_text("Unknown command.")
 
-async def weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not check_auth(update):
-        return await unauthorized_response(update)
-    # Simplified: call trade_executor for now
-  
+def main():
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler(["daily","open","closed","status","maketrade"], handle))
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
