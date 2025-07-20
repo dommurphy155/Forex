@@ -332,9 +332,9 @@ async def main_loop():
 
 if __name__ == '__main__':
     try:
-        bot_app.run_polling(stop_signals=None)
+        application.run_polling(stop_signals=None)
     except Exception as e:
-        logger.exception(f"Fatal error in bot loop: {e}")
+        logging.basicConfig(...)
         sys.exit(1)
 
 if __name__ == "__main__":
