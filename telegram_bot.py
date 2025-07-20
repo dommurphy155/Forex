@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-import os, sys, asyncio, subprocess, logging
-from telegram import Update, Bot
+import os
+import sys
+import asyncio
+import logging
+from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -18,27 +21,37 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cmd = update.message.text.strip()
     if not check_auth(update):
         return await unauthorized_response(update)
+
+    # Use absolute path to trade_executor.py if needed or ensure running in the right cwd
+    exe = sys.executable
+    te_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_executor.py")
+
     if cmd == "/daily":
-        p = await asyncio.create_subprocess_exec(sys.executable, "trade_executor.py", "status", stdout=asyncio.subprocess.PIPE)
-        out,_ = await p.communicate(); await update.message.reply_text(out.decode())
+        p = await asyncio.create_subprocess_exec(exe, te_script, "status", stdout=asyncio.subprocess.PIPE)
+        out, _ = await p.communicate()
+        await update.message.reply_text(out.decode())
     elif cmd == "/open":
-        p = await asyncio.create_subprocess_exec(sys.executable, "trade_executor.py", "open", stdout=asyncio.subprocess.PIPE)
-        out,_ = await p.communicate(); await update.message.reply_text(out.decode())
+        p = await asyncio.create_subprocess_exec(exe, te_script, "open", stdout=asyncio.subprocess.PIPE)
+        out, _ = await p.communicate()
+        await update.message.reply_text(out.decode())
     elif cmd == "/closed":
-        p = await asyncio.create_subprocess_exec(sys.executable, "trade_executor.py", "closed", stdout=asyncio.subprocess.PIPE)
-        out,_ = await p.communicate(); await update.message.reply_text(out.decode())
+        p = await asyncio.create_subprocess_exec(exe, te_script, "closed", stdout=asyncio.subprocess.PIPE)
+        out, _ = await p.communicate()
+        await update.message.reply_text(out.decode())
     elif cmd == "/status":
-        p = await asyncio.create_subprocess_exec(sys.executable, "trade_executor.py", "status", stdout=asyncio.subprocess.PIPE)
-        out,_ = await p.communicate(); await update.message.reply_text(out.decode())
+        p = await asyncio.create_subprocess_exec(exe, te_script, "status", stdout=asyncio.subprocess.PIPE)
+        out, _ = await p.communicate()
+        await update.message.reply_text(out.decode())
     elif cmd == "/maketrade":
-        p = await asyncio.create_subprocess_exec(sys.executable, "trade_executor.py", stdout=asyncio.subprocess.PIPE)
-        out,_ = await p.communicate(); await update.message.reply_text(out.decode())
+        p = await asyncio.create_subprocess_exec(exe, te_script, stdout=asyncio.subprocess.PIPE)
+        out, _ = await p.communicate()
+        await update.message.reply_text(out.decode())
     else:
         await update.message.reply_text("Unknown command.")
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler(["daily","open","closed","status","maketrade"], handle))
+    app.add_handler(CommandHandler(["daily", "open", "closed", "status", "maketrade"], handle))
     app.run_polling()
 
 if __name__ == "__main__":
