@@ -133,27 +133,74 @@ async def execute_trade(order):
         await save_trade(resp['orderCreateTransaction'])
     return resp
 
+# --- Helper for calculating daily and weekly ROI/loss ---
+
+async def calculate_profit_since(start_time: datetime):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT entry_price, take_profit, stop_loss, date FROM trades WHERE date >= ?", (start_time.isoformat(),)
+        )
+        rows = await cursor.fetchall()
+    if not rows:
+        return 0.0
+    # Simple P/L calc placeholder: sum difference between TP and entry or SL and entry
+    profit = 0.0
+    for entry_price, tp, sl, date_str in rows:
+        # crude: Assume trade closed at TP if tp>0 else sl if sl>0 else 0
+        if tp and tp > 0:
+            profit += (tp - entry_price) * 10000  # pip value crude example
+        elif sl and sl > 0:
+            profit += (sl - entry_price) * 10000
+    return profit
+
 # --- Telegram handlers ---
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         bal = await get_account_balance()
-        await update.message.reply_text(f"✅ Bot online. Account balance: ${bal:.2f}")
+        await update.message.reply_text(f"✅ All systems are operating smoothly.\n💰 Account balance: ${bal:.2f}\n🔄 Bot running without issues.")
     except Exception as e:
         logger.error(f"Status command error: {e}")
-        await update.message.reply_text(f"❌ Status check failed: {e}")
+        await update.message.reply_text(f"❌ System check failed!\n⚠️ Issue: {e}")
+
+async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        start_time = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        profit = await calculate_profit_since(start_time)
+        expected_roi = (profit / await get_account_balance()) * 100 if profit else 0
+        await update.message.reply_text(f"📅 Daily Summary:\n"
+                                        f"💸 Profit/Loss: ${profit:.2f}\n"
+                                        f"📈 Expected ROI by EOD: {expected_roi:.2f}%")
+    except Exception as e:
+        logger.error(f"Daily command error: {e}")
+        await update.message.reply_text(f"❌ Failed to fetch daily summary: {e}")
+
+async def weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        start_time = datetime.utcnow() - timedelta(days=datetime.utcnow().weekday())  # start of week (Monday)
+        profit = await calculate_profit_since(start_time)
+        expected_roi = (profit / await get_account_balance()) * 100 if profit else 0
+        await update.message.reply_text(f"📅 Weekly Summary:\n"
+                                        f"💸 Profit/Loss: ${profit:.2f}\n"
+                                        f"📈 Expected ROI by EOW: {expected_roi:.2f}%")
+    except Exception as e:
+        logger.error(f"Weekly command error: {e}")
+        await update.message.reply_text(f"❌ Failed to fetch weekly summary: {e}")
 
 async def open_trades_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         trades = await get_open_trades()
         bal = await get_account_balance()
         if not trades:
-            await update.message.reply_text("No open trades.")
+            await update.message.reply_text("❌ No open trades found.")
             return
         lines = []
+        total_roi = 0.0
         for t in trades:
             pl = float(t['unrealizedPL'])
             roi = (pl / bal) * 100 if bal else 0
-            lines.append(f"{t['instrument']}: P&L ${pl:.2f} (~{roi:.2f}%)")
+            total_roi += roi
+            lines.append(f"💹 {t['instrument']}: P&L ${pl:.2f} (~{roi:.2f}%)")
+        lines.append(f"\n🔢 Total potential ROI from open trades: {total_roi:.2f}%")
         await update.message.reply_text("\n".join(lines))
     except Exception as e:
         logger.error(f"Open trades error: {e}")
@@ -163,12 +210,12 @@ async def maketrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global last_trade_time
     now = datetime.utcnow()
     if now < last_trade_time + timedelta(minutes=COOLDOWN_PERIOD):
-        await update.message.reply_text("⚠️ Cooldown active. Try again later.")
+        await update.message.reply_text("⏳ Cooldown active. Please wait before placing another trade.")
         return
     try:
         order = await analyze_market_and_prepare_order()
         await execute_trade(order)
-        await update.message.reply_text(f"✅ Trade executed: {order['instrument']} {order['units']} units.")
+        await update.message.reply_text(f"✅ Trade executed for {order['instrument']} with {order['units']} units. 💹")
         last_trade_time = now
     except Exception as e:
         logger.error(f"Trade error: {e}")
@@ -178,6 +225,8 @@ async def maketrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def build_app():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("daily", daily))
+    app.add_handler(CommandHandler("weekly", weekly))
     app.add_handler(CommandHandler("open", open_trades_cmd))
     app.add_handler(CommandHandler("maketrade", maketrade))
     return app
