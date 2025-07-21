@@ -92,15 +92,27 @@ def add_indicators(df):
     df['atr'] = average_true_range(df['h'], df['l'], df['c'], window=14)
     return df.dropna()
 
+def format_price(price: float) -> str:
+    # OANDA expects price strings with max 5 decimal places for FX pairs
+    return f"{price:.5f}"
+
 async def place(p, units, tp, sl):
+    tp_str = format_price(tp)
+    sl_str = format_price(sl)
+
+    # sanity checks to avoid invalid TP/SL orders (they must be > 0 and different from price)
+    if float(tp_str) <= 0 or float(sl_str) <= 0:
+        logger.error(f"Invalid TP/SL price: TP={tp_str}, SL={sl_str} for {p}")
+        raise ValueError("Invalid take profit or stop loss price.")
+
     req = orders.OrderCreate(OANDA_ACCOUNT_ID, {"order": {
         "units": str(units),
         "instrument": p,
         "type": "MARKET",
         "timeInForce": "FOK",
         "positionFill": "DEFAULT",
-        "takeProfitOnFill": {"price": str(tp)},
-        "stopLossOnFill": {"price": str(sl)}
+        "takeProfitOnFill": {"price": tp_str},
+        "stopLossOnFill": {"price": sl_str}
     }})
     resp = await retry_request(oanda.request, req)
     logger.info(f"{p} order response: {resp}")
@@ -168,9 +180,21 @@ async def place_dummy_trade():
     size = 1  # smallest trade size in units
     price = last['c']
     atr = last['atr']
-    tp = price + atr * 0.5
-    sl = price - atr * 0.5
+
+    # Ensure TP > price if buy, SL < price, and vice versa
     units = size if random.choice([True, False]) else -size
+    if units > 0:
+        tp = price + atr * 0.5
+        sl = price - atr * 0.5
+    else:
+        tp = price - atr * 0.5
+        sl = price + atr * 0.5
+
+    # Validate price levels
+    if tp <= 0 or sl <= 0:
+        logger.error(f"Invalid TP/SL calculated for dummy trade on {p}: TP={tp}, SL={sl}")
+        raise ValueError("Invalid TP or SL price for dummy trade")
+
     await place(p, units, tp, sl)
 
 async def main_loop():
