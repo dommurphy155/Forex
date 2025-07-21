@@ -1,5 +1,7 @@
-python-telegram-bot==20.0
-python-dotenv==0.21.0
-requests==2.26.0
-urllib3==1.26.15
-telethon==1.30.0
+oandapyV20
+requests
+numpy
+pandas
+matplotlib
+ta
+python-telegram-bot
