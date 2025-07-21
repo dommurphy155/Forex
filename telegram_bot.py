@@ -118,8 +118,8 @@ async def maketrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global last_trade_time
     if datetime.utcnow() < last_trade_time + timedelta(minutes=COOLDOWN_PERIOD):
         return await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="⏳ Cooldown active, wait before next trade.")
-    # ... (Insert your MACD+RSI logic here as per bot.py)
-    await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ Trade logic placeholder")
+    # Insert your MACD+RSI+ATR strategy logic here
+    await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="✅ Trade executed (placeholder)")
     last_trade_time = datetime.utcnow()
 
 # App initialization
@@ -134,6 +134,7 @@ def build_app():
 
 async def main():
     app = build_app()
+    await app.initialize()
     await app.start()
     logger.info("Bot started")
     await app.updater.start_polling()
