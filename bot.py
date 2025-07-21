@@ -1,5 +1,3 @@
-# bot.py
-
 import os
 import asyncio
 import logging
@@ -167,7 +165,7 @@ async def place_dummy_trade():
     df = add_indicators(await fetch_candles(p))
     last = df.iloc[-1]
     bal = await get_balance()
-    size = 1
+    size = 1  # smallest trade size in units
     price = last['c']
     atr = last['atr']
     tp = price + atr * 0.5
