@@ -16,14 +16,19 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     open_count = len(ops)
     unrealized_total = sum(float(t['unrealizedPL']) for t in ops) if ops else 0
     roi_percent = (unrealized_total / bal * 100) if bal else 0
+    time_since_trade = (datetime.utcnow() - last).seconds // 60
     msg = (
         f"✅ *Bot Status*\n"
         f"🤖 Bot is online and operational.\n"
         f"💰 Balance: `£{bal:,.2f}`\n"
         f"📈 Open Trades: {open_count}\n"
         f"💹 Unrealized P&L: `£{unrealized_total:.2f}` (~{roi_percent:.2f}%)\n"
-        f"⏱️ Last trade: {(datetime.utcnow() - last).seconds // 60} minutes ago\n"
-        f"⚙️ Running scheduled trade ticks every 5 minutes."
+        f"⏱️ Last trade: {time_since_trade} minutes ago\n"
+        f"⚙️ Running scheduled trade ticks every 5 minutes.\n\n"
+        f"📊 *Performance Snapshot:*\n"
+        f"- Risk per trade: `{int(os.getenv('TRADE_RISK_PERCENT', '1'))}%`\n"
+        f"- Max leverage: `{os.getenv('MAX_LEVERAGE', '20')}x`\n"
+        f"- Allowed pairs: `{os.getenv('ALLOWED_PAIRS', 'EUR_USD,USD_JPY')}`"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -35,11 +40,12 @@ async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bal = await get_balance()
     total_unrealized = sum(float(t['unrealizedPL']) for t in ops)
     roi = (total_unrealized / bal * 100) if bal else 0
+    # Could add realized P&L tracking later
     msg = (
         f"📅 *Daily P&L Report*\n"
         f"💰 Current Balance: `£{bal:,.2f}`\n"
         f"📈 Unrealized P&L from open trades: `£{total_unrealized:.2f}` (~{roi:.2f}%)\n"
-        f"⚠️ Note: Realized P&L and closed trades not yet tracked."
+        f"⚠️ Note: Realized P&L and closed trades tracking pending implementation."
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -48,6 +54,7 @@ async def weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bal = await get_balance()
     total_unrealized = sum(float(t['unrealizedPL']) for t in ops) if ops else 0
     roi = (total_unrealized / bal * 100) if bal else 0
+    # Add weekly realized P&L tracking in future
     msg = (
         f"📈 *Weekly P&L Report*\n"
         f"💰 Current Balance: `£{bal:,.2f}`\n"
@@ -60,24 +67,34 @@ async def open_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ops = await get_open()
     if not ops:
         await update.message.reply_text("📭 No open trades.")
-    else:
-        bal = await get_balance()
-        msgs = [
-            f"💼 {t['instrument']}: `£{float(t['unrealizedPL']):.2f}` (~{100 * float(t['unrealizedPL']) / bal:.2f}%)"
-            for t in ops
-        ]
-        total_roi = sum(100 * float(t['unrealizedPL']) / bal for t in ops)
-        msgs.append(f"📊 *Total ROI:* `{total_roi:.2f}%`")
-        await update.message.reply_text("\n".join(msgs), parse_mode="Markdown")
+        return
+    bal = await get_balance()
+    msgs = []
+    for t in ops:
+        unrealized = float(t['unrealizedPL'])
+        roi_pct = (100 * unrealized / bal) if bal else 0
+        emoji = "📈" if unrealized >= 0 else "📉"
+        msgs.append(f"{emoji} {t['instrument']}: `£{unrealized:.2f}` (~{roi_pct:.2f}%)")
+    total_roi = sum(100 * float(t['unrealizedPL']) / bal for t in ops)
+    msgs.append(f"📊 *Total ROI:* `{total_roi:.2f}%`")
+    await update.message.reply_text("\n".join(msgs), parse_mode="Markdown")
 
 async def maketrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global last
     now = datetime.utcnow()
-    if now < last + timedelta(minutes=10):
-        await update.message.reply_text("⏳ Trade cooldown active. Try again later.")
-        return
+    # Removed cooldown per your request (no cooldown)
+    # if now < last + timedelta(minutes=10):
+    #     await update.message.reply_text("⏳ Trade cooldown active. Try again later.")
+    #     return
     await update.message.reply_text("⚙️ Trade request acknowledged.\nAuto-trading operates on a 5-min cycle.")
     last = now
+    # Trigger one tick immediately
+    try:
+        await tick()
+        await update.message.reply_text("✅ Trade tick executed.")
+    except Exception as e:
+        logger.error(f"Error during trade tick: {e}")
+        await update.message.reply_text(f"❌ Error executing trade tick: {e}")
 
 async def closeall(update: Update, context: ContextTypes.DEFAULT_TYPE):
     closed_trades = await close_all_trades()
@@ -99,7 +116,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🧾 *Command Menu*\n"
         "/status - Check bot and balance status\n"
         "/open - Show current open trades\n"
-        "/maketrade - Trigger manual trade (cooldown enforced)\n"
+        "/maketrade - Trigger manual trade (no cooldown)\n"
         "/daily - View today's P&L\n"
         "/weekly - View weekly P&L\n"
         "/closeall - Close all open trades\n"
