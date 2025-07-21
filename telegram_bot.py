@@ -3,7 +3,6 @@ from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from bot import get_balance, get_open, tick, close_all_trades
-from config import TELEGRAM_CHAT_ID
 import nest_asyncio
 
 logging.basicConfig(level=logging.INFO)
@@ -26,7 +25,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏱️ Last trade: {time_since_trade} minutes ago\n"
         f"⚙️ Running scheduled trade ticks every 5 minutes.\n\n"
         f"📊 *Performance Snapshot:*\n"
-        f"- Risk per trade: `{int(os.getenv('TRADE_RISK_PERCENT', '1'))}%`\n"
+        f"- Risk per trade: `{float(os.getenv('TRADE_RISK_PERCENT', '0.02'))*100:.0f}%`\n"
         f"- Max leverage: `{os.getenv('MAX_LEVERAGE', '20')}x`\n"
         f"- Allowed pairs: `{os.getenv('ALLOWED_PAIRS', 'EUR_USD,USD_JPY')}`"
     )
@@ -40,7 +39,6 @@ async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bal = await get_balance()
     total_unrealized = sum(float(t['unrealizedPL']) for t in ops)
     roi = (total_unrealized / bal * 100) if bal else 0
-    # Could add realized P&L tracking later
     msg = (
         f"📅 *Daily P&L Report*\n"
         f"💰 Current Balance: `£{bal:,.2f}`\n"
@@ -54,7 +52,6 @@ async def weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bal = await get_balance()
     total_unrealized = sum(float(t['unrealizedPL']) for t in ops) if ops else 0
     roi = (total_unrealized / bal * 100) if bal else 0
-    # Add weekly realized P&L tracking in future
     msg = (
         f"📈 *Weekly P&L Report*\n"
         f"💰 Current Balance: `£{bal:,.2f}`\n"
@@ -82,13 +79,8 @@ async def open_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def maketrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global last
     now = datetime.utcnow()
-    # Removed cooldown per your request (no cooldown)
-    # if now < last + timedelta(minutes=10):
-    #     await update.message.reply_text("⏳ Trade cooldown active. Try again later.")
-    #     return
-    await update.message.reply_text("⚙️ Trade request acknowledged.\nAuto-trading operates on a 5-min cycle.")
     last = now
-    # Trigger one tick immediately
+    await update.message.reply_text("⚙️ Trade request acknowledged.\nAuto-trading operates on a 5-min cycle.")
     try:
         await tick()
         await update.message.reply_text("✅ Trade tick executed.")
