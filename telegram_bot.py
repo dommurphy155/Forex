@@ -2,7 +2,7 @@ import os, asyncio, logging
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from bot import get_balance, get_open, tick
+from bot import get_balance, get_open, tick, close_all_trades
 from config import TELEGRAM_CHAT_ID
 import nest_asyncio
 
@@ -44,7 +44,6 @@ async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Ideally would pull weekly closed trades and P&L
     ops = await get_open()
     bal = await get_balance()
     total_unrealized = sum(float(t['unrealizedPL']) for t in ops) if ops else 0
@@ -81,8 +80,7 @@ async def maketrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last = now
 
 async def closeall(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Placeholder: Assume you implement a function bot.close_all_trades() returning closed trades and P&L summary
-    closed_trades = await context.bot_data.get('close_all_trades', lambda: [])()
+    closed_trades = await close_all_trades()
     if not closed_trades:
         await update.message.reply_text("🛑 No trades to close.")
         return
