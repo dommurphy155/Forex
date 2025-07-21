@@ -78,8 +78,7 @@ async def open_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def maketrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global last
-    now = datetime.utcnow()
-    last = now
+    last = datetime.utcnow()
     await update.message.reply_text("⚙️ Trade request acknowledged.\nAuto-trading operates on a 5-min cycle.")
     try:
         await tick()
