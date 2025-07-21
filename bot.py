@@ -105,7 +105,6 @@ async def place(p, units, tp, sl):
     resp = await retry_request(oanda.request, req)
     logger.info(f"{p} order response: {resp}")
 
-    # Fetch open trades and save the matching one
     open_trades = await get_open()
     for tr in open_trades:
         if tr['instrument'] == p and int(tr['currentUnits']) == units:
@@ -166,34 +165,18 @@ async def close_all_trades():
     return closed
 
 async def place_dummy_trade():
+    await init_db()
     p = random.choice(ALLOWED_PAIRS)
     df = add_indicators(await fetch_candles(p))
     last = df.iloc[-1]
+    size = 1  # smallest unit
     price = last['c']
     atr = last['atr']
-
-    # Minimal unit size
-    size = 1
+    tp = price + atr * 0.5
+    sl = price - atr * 0.5
     units = size if random.choice([True, False]) else -size
-
-    # Minimum price increment for the instrument (adjust if needed)
-    min_tick = 0.0001
-
-    # Enforce minimum distance for TP/SL, e.g., 5 ticks away
-    min_dist = min_tick * 5
-
-    if units > 0:
-        tp = round(price + max(atr * 0.5, min_dist), 5)
-        sl = round(price - max(atr * 0.5, min_dist), 5)
-    else:
-        tp = round(price - max(atr * 0.5, min_dist), 5)
-        sl = round(price + max(atr * 0.5, min_dist), 5)
-
-    try:
-        await place(p, units, tp, sl)
-        logger.info(f"Dummy trade placed on {p} units {units} TP {tp} SL {sl}")
-    except Exception as e:
-        logger.error(f"Error placing dummy trade: {e}")
+    await place(p, units, tp, sl)
+    await asyncio.sleep(1)  # wait for OANDA to register the order
 
 async def main_loop():
     await init_db()
