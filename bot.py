@@ -92,16 +92,21 @@ def add_indicators(df):
     df['atr'] = average_true_range(df['h'], df['l'], df['c'], window=14)
     return df.dropna()
 
-async def place(p, units, tp, sl):
-    req = orders.OrderCreate(OANDA_ACCOUNT_ID, {"order": {
+async def place(p, units, tp=None, sl=None):
+    order_data = {
         "units": str(units),
         "instrument": p,
         "type": "MARKET",
         "timeInForce": "FOK",
-        "positionFill": "DEFAULT",
-        "takeProfitOnFill": {"price": str(tp)},
-        "stopLossOnFill": {"price": str(sl)}
-    }})
+        "positionFill": "DEFAULT"
+    }
+
+    if tp:
+        order_data["takeProfitOnFill"] = {"price": f"{tp:.5f}"}
+    if sl:
+        order_data["stopLossOnFill"] = {"price": f"{sl:.5f}"}
+
+    req = orders.OrderCreate(OANDA_ACCOUNT_ID, {"order": order_data})
     resp = await retry_request(oanda.request, req)
     logger.info(f"{p} order response: {resp}")
 
@@ -145,7 +150,7 @@ async def close_all_trades():
 
         close_order = orders.OrderCreate(
             OANDA_ACCOUNT_ID,
-            data = {
+            data={
                 "order": {
                     "units": str(units),
                     "instrument": instrument,
@@ -169,14 +174,9 @@ async def place_dummy_trade():
     p = random.choice(ALLOWED_PAIRS)
     df = add_indicators(await fetch_candles(p))
     last = df.iloc[-1]
-    size = 1  # smallest unit
-    price = last['c']
-    atr = last['atr']
-    tp = price + atr * 0.5
-    sl = price - atr * 0.5
-    units = size if random.choice([True, False]) else -size
-    await place(p, units, tp, sl)
-    await asyncio.sleep(1)  # wait for OANDA to register the order
+    units = 1 if random.choice([True, False]) else -1
+    await place(p, units)  # No TP/SL for dummy trade
+    await asyncio.sleep(1)
 
 async def main_loop():
     await init_db()
