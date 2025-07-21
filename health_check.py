@@ -1,18 +1,15 @@
-import requests
+import asyncio, logging
+from bot import get_account, get_open
+logger = logging.getLogger()
 
-OANDA_HEALTH_URL = "https://api-fxpractice.oanda.com/v3/accounts"
-
-def check_oanda_api():
+async def hc():
     try:
-        response = requests.get(OANDA_HEALTH_URL, timeout=5)
-        response.raise_for_status()
-        return True, "✅ OANDA API reachable"
-    except requests.exceptions.RequestException as e:
-        return False, f"❌ OANDA API error: {e}"
+        a = await get_account()
+        o = await get_open()
+        return bool(a and o is not None)
+    except Exception:
+        logger.error("Health check failed", exc_info=True)
+        return False
 
-def main():
-    status, message = check_oanda_api()
-    print(message)
-
-if __name__ == "__main__":
-    main()
+if __name__=="__main__":
+    print("✅ Bot healthy" if asyncio.run(hc()) else "❌ Bot unhealthy")
