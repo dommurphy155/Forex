@@ -2,7 +2,7 @@ import os, asyncio, logging
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from bot import get_balance, get_open, tick, close_all_trades
+from bot import get_balance, get_open, tick, close_all_trades, place_dummy_trade
 import nest_asyncio
 
 logging.basicConfig(level=logging.INFO)
@@ -88,6 +88,14 @@ async def maketrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error during trade tick: {e}")
         await update.message.reply_text(f"❌ Error executing trade tick: {e}")
 
+async def dummytrade(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await place_dummy_trade()
+        await update.message.reply_text("✅ Dummy trade placed successfully.")
+    except Exception as e:
+        logger.error(f"Error placing dummy trade: {e}")
+        await update.message.reply_text(f"❌ Failed to place dummy trade: {e}")
+
 async def closeall(update: Update, context: ContextTypes.DEFAULT_TYPE):
     closed_trades = await close_all_trades()
     if not closed_trades:
@@ -109,6 +117,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/status - Check bot and balance status\n"
         "/open - Show current open trades\n"
         "/maketrade - Trigger manual trade (no cooldown)\n"
+        "/dummytrade - Place a random small dummy trade instantly\n"
         "/daily - View today's P&L\n"
         "/weekly - View weekly P&L\n"
         "/closeall - Close all open trades\n"
@@ -123,6 +132,7 @@ def build():
     app.add_handler(CommandHandler("weekly", weekly))
     app.add_handler(CommandHandler("open", open_cmd))
     app.add_handler(CommandHandler("maketrade", maketrade))
+    app.add_handler(CommandHandler("dummytrade", dummytrade))
     app.add_handler(CommandHandler("closeall", closeall))
     app.add_handler(CommandHandler("help", help_cmd))
     return app
