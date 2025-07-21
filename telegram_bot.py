@@ -137,8 +137,7 @@ async def main():
     await app.initialize()
     await app.start()
     logger.info("Bot started")
-    await app.updater.start_polling()
-    await app.updater.idle()
+    await app.run_polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
