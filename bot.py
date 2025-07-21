@@ -169,14 +169,31 @@ async def place_dummy_trade():
     p = random.choice(ALLOWED_PAIRS)
     df = add_indicators(await fetch_candles(p))
     last = df.iloc[-1]
-    bal = await get_balance()
-    size = 1  # smallest trade size in units
     price = last['c']
     atr = last['atr']
-    tp = price + atr * 0.5
-    sl = price - atr * 0.5
+
+    # Minimal unit size
+    size = 1
     units = size if random.choice([True, False]) else -size
-    await place(p, units, tp, sl)
+
+    # Minimum price increment for the instrument (adjust if needed)
+    min_tick = 0.0001
+
+    # Enforce minimum distance for TP/SL, e.g., 5 ticks away
+    min_dist = min_tick * 5
+
+    if units > 0:
+        tp = round(price + max(atr * 0.5, min_dist), 5)
+        sl = round(price - max(atr * 0.5, min_dist), 5)
+    else:
+        tp = round(price - max(atr * 0.5, min_dist), 5)
+        sl = round(price + max(atr * 0.5, min_dist), 5)
+
+    try:
+        await place(p, units, tp, sl)
+        logger.info(f"Dummy trade placed on {p} units {units} TP {tp} SL {sl}")
+    except Exception as e:
+        logger.error(f"Error placing dummy trade: {e}")
 
 async def main_loop():
     await init_db()
