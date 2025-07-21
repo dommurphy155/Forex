@@ -1,3 +1,5 @@
+# bot.py
+
 import os
 import asyncio
 import logging
@@ -11,6 +13,7 @@ from config import OANDA_API_KEY, OANDA_ACCOUNT_ID, DB_PATH, ALLOWED_PAIRS, TRAD
 from ta.trend import macd, macd_signal
 from ta.momentum import rsi
 from ta.volatility import average_true_range
+import random
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger()
@@ -113,8 +116,7 @@ async def tick():
             df = add_indicators(await fetch_candles(p))
             last, prev = df.iloc[-1], df.iloc[-2]
             bal, atr = await get_balance(), last['atr']
-            size = int((bal * TRADE_RISK_PERCENT) / atr / 100000)  # Confirm sizing logic fits instrument
-            
+            size = int((bal * TRADE_RISK_PERCENT) / atr / 100000)
             if size == 0:
                 continue
 
@@ -132,17 +134,13 @@ async def tick():
             logger.error(f"Error in tick for {p}: {e}")
 
 async def close_all_trades():
-    """
-    Close all open trades and return list of dicts with instrument and P&L info
-    """
     open_trades = await get_open()
     closed = []
     for trade in open_trades:
         trade_id = trade['id']
         instrument = trade['instrument']
-        units = -int(trade['currentUnits'])  # to close, send opposite units
+        units = -int(trade['currentUnits'])
 
-        # Create close order
         close_order = orders.OrderCreate(
             OANDA_ACCOUNT_ID,
             data = {
@@ -158,12 +156,24 @@ async def close_all_trades():
         try:
             resp = await retry_request(oanda.request, close_order)
             logger.info(f"Closed trade {trade_id} for {instrument}: {resp}")
-            # Calculate P&L from response or trade data if available (simplified here)
             pl = float(trade.get('unrealizedPL', 0))
             closed.append({'instrument': instrument, 'pl': pl})
         except Exception as e:
             logger.error(f"Failed to close trade {trade_id}: {e}")
     return closed
+
+async def place_dummy_trade():
+    p = random.choice(ALLOWED_PAIRS)
+    df = add_indicators(await fetch_candles(p))
+    last = df.iloc[-1]
+    bal = await get_balance()
+    size = 1
+    price = last['c']
+    atr = last['atr']
+    tp = price + atr * 0.5
+    sl = price - atr * 0.5
+    units = size if random.choice([True, False]) else -size
+    await place(p, units, tp, sl)
 
 async def main_loop():
     await init_db()
