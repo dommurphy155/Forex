@@ -4,6 +4,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from bot import get_balance, get_open, tick
 from config import TELEGRAM_CHAT_ID
+import nest_asyncio
 
 logging.basicConfig(level=logging.INFO)
 logger=logging.getLogger()
@@ -47,6 +48,7 @@ def build():
     return app
 
 async def main():
+    nest_asyncio.apply()
     app=build()
     await app.run_polling()
 
