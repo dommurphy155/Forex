@@ -4,11 +4,10 @@ import logging
 from datetime import datetime, timedelta
 import aiosqlite
 import pandas as pd
-import numpy as np
 from oandapyV20 import API
 from oandapyV20.endpoints import accounts, trades, orders, instruments
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
-from config import OANDA_API_KEY, OANDA_ACCOUNT_ID, DB_PATH, ALLOWED_PAIRS, TRADE_RISK_PERCENT, MAX_LEVERAGE
+from config import OANDA_API_KEY, OANDA_ACCOUNT_ID, DB_PATH, ALLOWED_PAIRS, TRADE_RISK_PERCENT
 from ta.trend import macd, macd_signal
 from ta.momentum import rsi
 from ta.volatility import average_true_range
@@ -17,6 +16,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger()
 
 oanda = API(access_token=OANDA_API_KEY, environment="practice")
+
 last_trade = datetime.utcnow() - timedelta(minutes=10)
 
 async def init_db():
@@ -46,29 +46,31 @@ async def save_trade(tr):
             tr['instrument'],
             int(tr['currentUnits']),
             float(tr['price']),
-            float(tr.get('takeProfit', 0)),
-            float(tr.get('stopLoss', 0)),
+            float(tr.get('takeProfitOnFill', {}).get('price', 0)),
+            float(tr.get('stopLossOnFill', {}).get('price', 0)),
             datetime.utcnow().isoformat()
         ))
         await db.commit()
 
-async def retry_request(func, *a, **k):
+async def retry_request(func, *args, **kwargs):
     async for attempt in AsyncRetrying(
         retry=retry_if_exception_type(Exception),
         stop=stop_after_attempt(3),
         wait=wait_exponential(min=1, max=4)
     ):
         with attempt:
-            return await asyncio.to_thread(func, *a, **k)
+            return await asyncio.to_thread(func, *args, **kwargs)
 
 async def get_account():
     return await retry_request(oanda.request, accounts.AccountSummary(accountID=OANDA_ACCOUNT_ID))
 
 async def get_balance():
-    return float((await get_account())['account']['balance'])
+    account = await get_account()
+    return float(account['account']['balance'])
 
 async def get_open():
-    return (await retry_request(oanda.request, trades.OpenTrades(accountID=OANDA_ACCOUNT_ID))).get('trades', [])
+    resp = await retry_request(oanda.request, trades.OpenTrades(accountID=OANDA_ACCOUNT_ID))
+    return resp.get('trades', [])
 
 async def fetch_candles(p, gran='M5', cnt=100):
     params = {"granularity": gran, "count": cnt, "price": "M"}
@@ -100,30 +102,68 @@ async def place(p, units, tp, sl):
         "stopLossOnFill": {"price": str(sl)}
     }})
     resp = await retry_request(oanda.request, req)
-    logger.info(f"{p} order -> {resp}")
+    logger.info(f"{p} order response: {resp}")
     if 'orderCreateTransaction' in resp:
         await save_trade(resp['orderCreateTransaction'])
 
 async def tick():
     global last_trade
     for p in ALLOWED_PAIRS:
-        df = add_indicators(await fetch_candles(p))
-        last, prev = df.iloc[-1], df.iloc[-2]
-        bal, atr = await get_balance(), last['atr']
-        size = int((bal * TRADE_RISK_PERCENT) / atr / 100000)
-        if size == 0:
-            continue
+        try:
+            df = add_indicators(await fetch_candles(p))
+            last, prev = df.iloc[-1], df.iloc[-2]
+            bal, atr = await get_balance(), last['atr']
+            size = int((bal * TRADE_RISK_PERCENT) / atr / 100000)  # Confirm sizing logic fits instrument
+            
+            if size == 0:
+                continue
 
-        buy = prev['macd'] < prev['sig'] and last['macd'] > last['sig'] and last['rsi'] < 70
-        sell = prev['macd'] > prev['sig'] and last['macd'] < last['sig'] and last['rsi'] > 30
+            buy = prev['macd'] < prev['sig'] and last['macd'] > last['sig'] and last['rsi'] < 70
+            sell = prev['macd'] > prev['sig'] and last['macd'] < last['sig'] and last['rsi'] > 30
 
-        if buy or sell:
-            units = size if buy else -size
-            price = last['c']
-            tp = price + atr * 3 if buy else price - atr * 3
-            sl = price - atr * 1.5 if buy else price + atr * 1.5
-            await place(p, units, tp, sl)
-            last_trade = datetime.utcnow()
+            if buy or sell:
+                units = size if buy else -size
+                price = last['c']
+                tp = price + atr * 3 if buy else price - atr * 3
+                sl = price - atr * 1.5 if buy else price + atr * 1.5
+                await place(p, units, tp, sl)
+                last_trade = datetime.utcnow()
+        except Exception as e:
+            logger.error(f"Error in tick for {p}: {e}")
+
+async def close_all_trades():
+    """
+    Close all open trades and return list of dicts with instrument and P&L info
+    """
+    open_trades = await get_open()
+    closed = []
+    for trade in open_trades:
+        trade_id = trade['id']
+        instrument = trade['instrument']
+        units = -int(trade['currentUnits'])  # to close, send opposite units
+
+        # Create close order
+        close_order = orders.OrderCreate(
+            OANDA_ACCOUNT_ID,
+            data = {
+                "order": {
+                    "units": str(units),
+                    "instrument": instrument,
+                    "type": "MARKET",
+                    "positionFill": "REDUCE_ONLY",
+                    "timeInForce": "FOK"
+                }
+            }
+        )
+        try:
+            resp = await retry_request(oanda.request, close_order)
+            logger.info(f"Closed trade {trade_id} for {instrument}: {resp}")
+            # Calculate P&L from response or trade data if available (simplified here)
+            pl = float(trade.get('unrealizedPL', 0))
+            closed.append({'instrument': instrument, 'pl': pl})
+        except Exception as e:
+            logger.error(f"Failed to close trade {trade_id}: {e}")
+    return closed
 
 async def main_loop():
     await init_db()
@@ -131,7 +171,7 @@ async def main_loop():
         try:
             await tick()
         except Exception as e:
-            logger.error(e)
+            logger.error(f"Tick error: {e}")
         await asyncio.sleep(300)
 
 if __name__ == "__main__":
