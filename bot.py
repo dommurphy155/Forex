@@ -1,6 +1,10 @@
-import os, asyncio, logging
+import os
+import asyncio
+import logging
 from datetime import datetime, timedelta
-import aiosqlite, pandas as pd, numpy as np
+import aiosqlite
+import pandas as pd
+import numpy as np
 from oandapyV20 import API
 from oandapyV20.endpoints import accounts, trades, orders, instruments
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -17,26 +21,43 @@ last_trade = datetime.utcnow() - timedelta(minutes=10)
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY, trade_id TEXT UNIQUE, instrument TEXT,
-            units INTEGER, entry_price REAL, take_profit REAL,
-            stop_loss REAL, date TEXT)""")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS trades (
+                id INTEGER PRIMARY KEY,
+                trade_id TEXT UNIQUE,
+                instrument TEXT,
+                units INTEGER,
+                entry_price REAL,
+                take_profit REAL,
+                stop_loss REAL,
+                date TEXT
+            )
+        """)
         await db.commit()
 
 async def save_trade(tr):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""INSERT OR IGNORE INTO trades
-            (trade_id,instrument,units,entry_price,take_profit,stop_loss,date)
-            VALUES (?,?,?,?,?,?,?)""",
-            (tr['id'], tr['instrument'], int(tr['currentUnits']),
-             float(tr['price']), float(tr.get('takeProfit', 0)),
-             float(tr.get('stopLoss', 0)), datetime.utcnow().isoformat()))
+        await db.execute("""
+            INSERT OR IGNORE INTO trades
+            (trade_id, instrument, units, entry_price, take_profit, stop_loss, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            tr['id'],
+            tr['instrument'],
+            int(tr['currentUnits']),
+            float(tr['price']),
+            float(tr.get('takeProfit', 0)),
+            float(tr.get('stopLoss', 0)),
+            datetime.utcnow().isoformat()
+        ))
         await db.commit()
 
 async def retry_request(func, *a, **k):
     async for attempt in AsyncRetrying(
-        retry=retry_if_exception_type(Exception), stop=stop_after_attempt(3),
-        wait=wait_exponential(min=1, max=4)):
+        retry=retry_if_exception_type(Exception),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(min=1, max=4)
+    ):
         with attempt:
             return await asyncio.to_thread(func, *a, **k)
 
@@ -53,9 +74,12 @@ async def fetch_candles(p, gran='M5', cnt=100):
     params = {"granularity": gran, "count": cnt, "price": "M"}
     data = await retry_request(oanda.request, instruments.InstrumentsCandles(instrument=p, params=params))
     df = pd.DataFrame([{
-        'time': c['time'], 'o': float(c['mid']['o']),
-        'h': float(c['mid']['h']), 'l': float(c['mid']['l']),
-        'c': float(c['mid']['c'])} for c in data.get('candles', [])])
+        'time': c['time'],
+        'o': float(c['mid']['o']),
+        'h': float(c['mid']['h']),
+        'l': float(c['mid']['l']),
+        'c': float(c['mid']['c'])
+    } for c in data.get('candles', [])])
     return df
 
 def add_indicators(df):
@@ -67,9 +91,14 @@ def add_indicators(df):
 
 async def place(p, units, tp, sl):
     req = orders.OrderCreate(OANDA_ACCOUNT_ID, {"order": {
-        "units": str(units), "instrument": p, "type": "MARKET", "timeInForce": "FOK",
-        "positionFill": "DEFAULT", "takeProfitOnFill": {"price": str(tp)},
-        "stopLossOnFill": {"price": str(sl)}}})
+        "units": str(units),
+        "instrument": p,
+        "type": "MARKET",
+        "timeInForce": "FOK",
+        "positionFill": "DEFAULT",
+        "takeProfitOnFill": {"price": str(tp)},
+        "stopLossOnFill": {"price": str(sl)}
+    }})
     resp = await retry_request(oanda.request, req)
     logger.info(f"{p} order -> {resp}")
     if 'orderCreateTransaction' in resp:
@@ -82,7 +111,8 @@ async def tick():
         last, prev = df.iloc[-1], df.iloc[-2]
         bal, atr = await get_balance(), last['atr']
         size = int((bal * TRADE_RISK_PERCENT) / atr / 100000)
-        if size == 0: continue
+        if size == 0:
+            continue
 
         buy = prev['macd'] < prev['sig'] and last['macd'] > last['sig'] and last['rsi'] < 70
         sell = prev['macd'] > prev['sig'] and last['macd'] < last['sig'] and last['rsi'] > 30
