@@ -30,7 +30,7 @@ cursor = conn.cursor()
 oanda = API(access_token=API_TOKEN, environment='practice' if DEMO_MODE else 'live')
 
 # Telegram Bot
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
+bot = Bot(token=TELEGRAM_TOKEN)
 
 # Rate-limit guard
 last_trade_time = datetime.utcnow() - timedelta(minutes=COOLDOWN_PERIOD)
