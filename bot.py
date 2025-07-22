@@ -277,5 +277,39 @@ async def main_loop():
             logger.error(f"Tick error: {e}")
         await asyncio.sleep(60)  # tick every 60 seconds for aggressive trading
 
+# -- Added dummy trade function --
+async def place_dummy_trade():
+    """
+    Place a dummy trade for the smallest amount on a random allowed pair,
+    bypassing all logic and conditions.
+    """
+    p = random.choice(ALLOWED_PAIRS)
+    units = 1  # smallest unit, always buy 1 unit
+    try:
+        req = orders.OrderCreate(
+            OANDA_ACCOUNT_ID,
+            data={
+                "order": {
+                    "units": str(units),
+                    "instrument": p,
+                    "type": "MARKET",
+                    "timeInForce": "FOK",
+                    "positionFill": "DEFAULT"
+                }
+            }
+        )
+        resp = await retry_request(oanda.request, req)
+        logger.info(f"Dummy trade placed on {p}: {resp}")
+
+        # Save trade info
+        open_trades = await get_open()
+        for tr in open_trades:
+            if tr['instrument'] == p and int(tr['currentUnits']) == units:
+                await save_trade(tr, 0, 0.0, "Dummy Trade", "Manual dummy trade")
+                break
+    except Exception as e:
+        logger.error(f"Failed to place dummy trade: {e}")
+        raise
+
 if __name__ == "__main__":
     asyncio.run(main_loop())
